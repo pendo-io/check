@@ -159,7 +159,7 @@ func (lp *linePrinter) trimList(stmts []ast.Stmt) []ast.Stmt {
 }
 
 func (lp *linePrinter) emptyStmt(n ast.Node) *ast.ExprStmt {
-	return &ast.ExprStmt{&ast.Ellipsis{Ellipsis: n.Pos(), Elt: nil}}
+	return &ast.ExprStmt{X: &ast.Ellipsis{Ellipsis: n.Pos(), Elt: nil}}
 }
 
 func (lp *linePrinter) emptyBlock(n ast.Node) *ast.BlockStmt {

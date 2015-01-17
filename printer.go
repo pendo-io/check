@@ -86,7 +86,7 @@ func (lp *linePrinter) printWithComments(n ast.Node) {
 			g.List[0].Slash = n.End() - 1
 		}
 	}
-	node := &printer.CommentedNode{n, lp.fnode.Comments}
+	node := &printer.CommentedNode{Node: n, Comments: lp.fnode.Comments}
 	lp.config.Fprint(&lp.output, lp.fset, node)
 }
 
@@ -159,12 +159,12 @@ func (lp *linePrinter) trimList(stmts []ast.Stmt) []ast.Stmt {
 }
 
 func (lp *linePrinter) emptyStmt(n ast.Node) *ast.ExprStmt {
-	return &ast.ExprStmt{&ast.Ellipsis{n.Pos(), nil}}
+	return &ast.ExprStmt{X: &ast.Ellipsis{Ellipsis: n.Pos(), Elt: nil}}
 }
 
 func (lp *linePrinter) emptyBlock(n ast.Node) *ast.BlockStmt {
 	p := n.Pos()
-	return &ast.BlockStmt{p, []ast.Stmt{lp.emptyStmt(n)}, p}
+	return &ast.BlockStmt{Lbrace: p, List: []ast.Stmt{lp.emptyStmt(n)}, Rbrace: p}
 }
 
 func PrintLine(filename string, line int) (string, error) {

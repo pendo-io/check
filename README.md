@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/masukomi/check.svg?branch=master)](https://travis-ci.org/masukomi/check)
+
 # Overview
 The Go language provides an internal testing library, named testing, which is relatively slim due to the fact that the standard library correctness by itself is verified using it. The check package, on the other hand, expects the standard library from Go to be working correctly, and builds on it to offer a richer testing framework for libraries and applications to use.
 

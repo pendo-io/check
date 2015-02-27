@@ -587,7 +587,7 @@ func newSuiteRunner(suite interface{}, runConf *RunConf, concurrent bool, bucket
 	if conf.Benchmark {
 		conf.Verbose = true
 	}
-	if concurrent && conf.ConcurrencyLevel == 0 {
+	if conf.ConcurrencyLevel < 1 {
 		conf.ConcurrencyLevel = 1
 	}
 

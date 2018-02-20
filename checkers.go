@@ -70,6 +70,10 @@ func (info *CheckerInfo) Info() *CheckerInfo {
 // resulting checker will succeed where the original one failed, and
 // vice-versa.
 //
+// Warning: Not cannot differentiate between the underlying checker failing due to check failure (e.g., obtained has
+// wrong length for HasLen) and due to malformed input (e.g., expected length passed to HasLen is not an integer);
+// Not will return success in both cases.
+//
 // For example:
 //
 //     c.Assert(a, Not(Equals), b)
@@ -89,9 +93,8 @@ func (checker *notChecker) Info() *CheckerInfo {
 }
 
 func (checker *notChecker) Check(params []interface{}, names []string) (result bool, error string) {
-	result, error = checker.sub.Check(params, names)
-	result = !result
-	return
+	result, _ = checker.sub.Check(params, names)
+	return !result, "" // suppress the error string, as a non-empty error string is an error regardless of result
 }
 
 // -----------------------------------------------------------------------

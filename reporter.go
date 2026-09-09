@@ -124,6 +124,89 @@ func renderCallHeader(label string, c *C, prefix, suffix string) string {
 		niceFuncName(pc), suffix)
 }
 
+/*************** Multi writer *****************/
+
+// multiWriter fans every event out to several reporters at once, so that a
+// run can produce a human readable log and a machine readable report at the
+// same time.
+type multiWriter struct {
+	writers []outputWriter
+}
+
+// combineWriters returns a single outputWriter driving all of writers. A lone
+// writer is returned as is, so the common single reporter case stays exactly
+// as it was.
+//
+// Writers are reordered so that the report building ones run first. They read
+// the failure log without consuming it, whereas the plain writer drains it
+// (see logger.WriteTo); running the plain writer first would leave every
+// failure in the report with an empty body.
+func combineWriters(writers []outputWriter) outputWriter {
+	if len(writers) == 1 {
+		return writers[0]
+	}
+	ordered := make([]outputWriter, 0, len(writers))
+	for _, w := range writers {
+		if _, ok := w.(reporter); ok {
+			ordered = append(ordered, w)
+		}
+	}
+	for _, w := range writers {
+		if _, ok := w.(reporter); !ok {
+			ordered = append(ordered, w)
+		}
+	}
+	return &multiWriter{writers: ordered}
+}
+
+func (w *multiWriter) StreamEnabled() bool {
+	for _, sub := range w.writers {
+		if sub.StreamEnabled() {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *multiWriter) Write(content []byte) (n int, err error) {
+	for _, sub := range w.writers {
+		if _, err = sub.Write(content); err != nil {
+			return 0, err
+		}
+	}
+	return len(content), nil
+}
+
+func (w *multiWriter) WriteCallStarted(label string, c *C) {
+	for _, sub := range w.writers {
+		sub.WriteCallStarted(label, c)
+	}
+}
+
+func (w *multiWriter) WriteCallSuccess(label string, c *C) {
+	for _, sub := range w.writers {
+		sub.WriteCallSuccess(label, c)
+	}
+}
+
+func (w *multiWriter) WriteCallSkipped(label string, c *C) {
+	for _, sub := range w.writers {
+		sub.WriteCallSkipped(label, c)
+	}
+}
+
+func (w *multiWriter) WriteCallError(label string, c *C) {
+	for _, sub := range w.writers {
+		sub.WriteCallError(label, c)
+	}
+}
+
+func (w *multiWriter) WriteCallFailure(label string, c *C) {
+	for _, sub := range w.writers {
+		sub.WriteCallFailure(label, c)
+	}
+}
+
 /*************** xUnit writer *****************/
 type xunitReport struct {
 	XMLName xml.Name     `xml:"testsuites"`
@@ -293,17 +376,29 @@ func (w *xunitWriter) WriteCallSuccess(label string, c *C) {
 
 func (w *xunitWriter) StreamEnabled() bool { return w.stream }
 
+// qualifiedSuiteName prefixes a suite name with the import path of the
+// package defining it, e.g. "example.com/project/api.TasksTests". Bare suite
+// names repeat freely across a large repository, and CI systems group test
+// cases by classname, so unqualified names silently merge unrelated suites.
+func qualifiedSuiteName(c *C) string {
+	name := c.method.suiteName()
+	if pkg := getFuncPackagePath(c.method.PC()); pkg != "" {
+		return pkg + "." + name
+	}
+	return name
+}
+
 func (w *xunitWriter) getSuite(c *C) (suite *xunitSuite) {
 	var ok bool
-	suiteName := c.method.suiteName()
+	key := qualifiedSuiteName(c)
 	w.m.Lock()
-	if suite, ok = w.suites[suiteName]; !ok {
+	if suite, ok = w.suites[key]; !ok {
 		suite = &xunitSuite{
-			Name:      suiteName,
-			Package:   getFuncPackage(c.method.PC()),
+			Name:      c.method.suiteName(),
+			Package:   getFuncPackagePath(c.method.PC()),
 			Timestamp: c.startTime,
 		}
-		w.suites[suiteName] = suite
+		w.suites[key] = suite
 	}
 	w.m.Unlock()
 
@@ -314,7 +409,7 @@ func (w *xunitWriter) newTestcase(c *C) xunitTestcase {
 	file, line := getFuncPosition(c.method.PC())
 	return xunitTestcase{
 		Name:      c.testName,
-		Classname: c.method.suiteName(),
+		Classname: qualifiedSuiteName(c),
 		File:      file,
 		Line:      line,
 		Time:      time.Since(c.startTime).Seconds(),

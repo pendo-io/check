@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -55,8 +58,8 @@ var (
 	newBenchMem        = flag.Bool("check.bmem", false, "Report memory benchmarks")
 	newListFlag        = flag.Bool("check.list", false, "List the names of all tests that will be run")
 	newWorkFlag        = flag.Bool("check.work", false, "Display and do not remove the test working directory")
-	reporterFlag       = flag.String("check.r", "plain", "Name of reporter for outputting result: [plain|xunit]")
-	outputFlag         = flag.String("check.output", "", "Name of the file to print report into. If empty, stdout is used")
+	reporterFlag       = flag.String("check.r", "plain", "Comma separated list of reporters for outputting results: [plain|xunit]")
+	outputFlag         = flag.String("check.output", "", "Name of the file to print report into. The token %pkg is replaced by the import path of the package under test, with slashes turned into underscores, so that packages tested in parallel do not overwrite each other. If empty, stdout is used")
 	newConcurrencyFlag = flag.Int("check.c", 5, "How many tests to run concurrently for concurrent test suites")
 )
 
@@ -78,17 +81,14 @@ func TestingT(testingT *testing.T) {
 		KeepWorkDir:      *oldWorkFlag || *newWorkFlag,
 		ConcurrencyLevel: *newConcurrencyFlag,
 	}
-	var err error
-	conf.Output, err = getOutput(*outputFlag)
+	names, err := parseReporters(*reporterFlag)
 	if err != nil {
 		testingT.Fatal(err.Error())
 	}
 
-	conf.Writer, err = getWriter(*reporterFlag, conf.Output, conf.Verbose, conf.Stream)
-	if err != nil {
-		testingT.Fatal(err.Error())
-	}
+	// Listing does not run anything, so avoid creating an output file for it.
 	if *oldListFlag || *newListFlag {
+		conf.Output = os.Stdout
 		w := bufio.NewWriter(os.Stdout)
 		for _, name := range ListAll(conf) {
 			fmt.Fprintln(w, name)
@@ -96,16 +96,60 @@ func TestingT(testingT *testing.T) {
 		w.Flush()
 		return
 	}
+
+	// %pkg resolves against the package that called TestingT, which is the
+	// package whose tests are about to run.
+	fileOutput, err := getOutput(*outputFlag, callerPackagePath(1))
+	if err != nil {
+		testingT.Fatal(err.Error())
+	}
+
+	// With a single reporter everything goes to -check.output, as it always
+	// has. With several, the machine readable reports take the file and the
+	// human readable log keeps the console, so that a CI failure still prints
+	// something useful.
+	logOutput, reportOutput := fileOutput, fileOutput
+	if len(names) > 1 {
+		logOutput = os.Stdout
+	}
+	conf.Output = logOutput
+
+	writers := make([]outputWriter, 0, len(names))
+	for _, name := range names {
+		// A reporter that produces a report writes it to reportOutput at the
+		// end; its log writer is only used in stream mode, and only the plain
+		// reporter should be narrating to the console.
+		logTo := logOutput
+		if len(names) > 1 && name != "plain" {
+			logTo = nil
+		}
+		w, err := getWriter(name, logTo, conf.Verbose, conf.Stream)
+		if err != nil {
+			testingT.Fatal(err.Error())
+		}
+		writers = append(writers, w)
+	}
+	conf.Writer = combineWriters(writers)
+
 	result := RunAll(conf)
 
-	if reporter, ok := conf.Writer.(reporter); ok {
+	reporting := 0
+	for _, w := range writers {
+		reporter, ok := w.(reporter)
+		if !ok {
+			continue
+		}
 		report, err := reporter.GetReport()
 		if err != nil {
 			testingT.Fatalf("could not generate report: %s", err.Error())
 		}
-		fmt.Fprintf(conf.Output, "%s", string(report))
-	} else {
-		fmt.Fprintf(conf.Output, "%s\n", result.String())
+		fmt.Fprintf(reportOutput, "%s", string(report))
+		reporting++
+	}
+	// Reporters such as plain have no report of their own; as long as one of
+	// them is active the familiar one line summary is still printed.
+	if reporting < len(writers) {
+		fmt.Fprintf(logOutput, "%s\n", result.String())
 	}
 
 	if !result.Passed() {
@@ -113,9 +157,59 @@ func TestingT(testingT *testing.T) {
 	}
 }
 
-func getOutput(filename string) (io.Writer, error) {
+// parseReporters splits the -check.r value into reporter names, rejecting
+// empty entries and duplicates.
+func parseReporters(value string) ([]string, error) {
+	var names []string
+	seen := make(map[string]bool)
+	for _, name := range strings.Split(value, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, errors.New("empty reporter name provided in: " + value)
+		}
+		if seen[name] {
+			return nil, errors.New("duplicate reporter name provided: " + name)
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// callerPackagePath returns the import path of the package containing the
+// function skip levels above the caller of this function.
+func callerPackagePath(skip int) string {
+	pc, _, _, ok := runtime.Caller(skip + 1)
+	if !ok {
+		return ""
+	}
+	return getFuncPackagePath(pc)
+}
+
+// packageFileToken renders an import path as a single file name component.
+func packageFileToken(pkg string) string {
+	if pkg == "" {
+		return "unknown_package"
+	}
+	return strings.NewReplacer("/", "_", "\\", "_").Replace(pkg)
+}
+
+// expandOutputPath substitutes the %pkg token in an -check.output value.
+func expandOutputPath(filename, pkg string) string {
+	return strings.Replace(filename, "%pkg", packageFileToken(pkg), -1)
+}
+
+func getOutput(filename string, pkg string) (io.Writer, error) {
 	if filename == "" {
 		return os.Stdout, nil
+	}
+	filename = expandOutputPath(filename, pkg)
+	// go test runs package binaries in parallel from arbitrary working
+	// directories, so the report directory may not exist yet.
+	if dir := filepath.Dir(filename); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, err
+		}
 	}
 	return os.Create(filename)
 }

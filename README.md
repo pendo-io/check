@@ -86,8 +86,10 @@ Run it with `go test`
 
   -check.output="": Name of the file to print report into. The token %pkg is
                     replaced by the import path of the package under test, with
-                    slashes turned into underscores. If empty, stdout is used
-  -check.r="plain": Comma separated list of reporters for outputting results: [plain|xunit]
+                    slashes turned into underscores. Defaults to $GOCHECK_OUTPUT
+                    when not given; if both are empty, stdout is used
+  -check.r="plain": Comma separated list of reporters for outputting results:
+                    [plain|xunit]. Defaults to $GOCHECK_REPORTERS when not given
   -check.v=false: Verbose mode
   -check.vv=false: Super verbose mode (disables output caching)
   -check.work=false: Display and do not remove the test working directory
@@ -125,6 +127,32 @@ and the log both go to `-check.output`, as before. With more than one, the
 reporters that produce a report write it to `-check.output` while the `plain`
 reporter keeps narrating to stdout, so a failing CI job still prints the
 assertion detail instead of a bare `--- FAIL: Test`.
+
+#### Mixing gocheck and plain testing packages
+
+Passing `-check.r` or `-check.output` to `go test ./...` fails in any package
+that does not link gocheck, because its test binary does not define those
+flags:
+
+```
+flag provided but not defined: -check.r
+FAIL    example.com/project/plainpkg
+```
+
+Set the environment variables instead. They apply only to the binaries that
+link gocheck and are ignored by every other package:
+
+```
+GOCHECK_REPORTERS=plain,xunit \
+GOCHECK_OUTPUT=reports/junit/junit-check-%pkg.xml \
+    go test ./...
+```
+
+`GOCHECK_REPORTERS` supplies the default for `-check.r` and `GOCHECK_OUTPUT`
+the default for `-check.output`. A flag that is actually passed always wins, so
+`-check.output=/tmp/foo.xml` still overrides an exported `GOCHECK_OUTPUT`, and
+that holds for `-check.r=plain` too even though `plain` is also the flag's
+default. An unset or empty variable leaves the flag's default in place.
 
 Test cases are reported with a `classname` of `<import path>.<suite name>`,
 for example `example.com/project/api.TasksTests`, and each `testsuite` carries the

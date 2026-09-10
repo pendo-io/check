@@ -4,6 +4,7 @@
 package check
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -136,4 +137,53 @@ func (s *ReporterFlagTestSuite) TestParseRejectsDuplicates(c *C) {
 func (s *ReporterFlagTestSuite) TestGetWriterRejectsUnknownName(c *C) {
 	_, err := getWriter("nope", os.Stdout, false, false)
 	c.Assert(err, ErrorMatches, "unknown reporter name provided: nope")
+}
+
+type FlagEnvTestSuite struct{}
+
+var _ = Suite(&FlagEnvTestSuite{})
+
+func (s *FlagEnvTestSuite) TestEnvSuppliesTheDefault(c *C) {
+	c.Assert(resolveFlag(false, "plain", "plain,xunit"), Equals, "plain,xunit")
+	c.Assert(resolveFlag(false, "", "reports/j-%pkg.xml"), Equals, "reports/j-%pkg.xml")
+}
+
+// An explicit flag has to beat the environment, so that a local run can
+// override whatever the CI harness exported.
+func (s *FlagEnvTestSuite) TestPassedFlagBeatsEnv(c *C) {
+	c.Assert(resolveFlag(true, "plain", "plain,xunit"), Equals, "plain")
+	c.Assert(resolveFlag(true, "/tmp/foo.xml", "reports/j-%pkg.xml"), Equals, "/tmp/foo.xml")
+}
+
+// An unset or empty variable must leave the flag default alone rather than
+// reaching parseReporters as a malformed value.
+func (s *FlagEnvTestSuite) TestEmptyEnvIsIgnored(c *C) {
+	c.Assert(resolveFlag(false, "plain", ""), Equals, "plain")
+	c.Assert(resolveFlag(false, "", ""), Equals, "")
+}
+
+func (s *FlagEnvTestSuite) TestFlagWasSet(c *C) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("check.r", "plain", "")
+	fs.String("check.output", "", "")
+
+	c.Assert(flagWasSet(fs, "check.r"), Equals, false)
+
+	// Explicitly passing the flag's own default value still counts as passed,
+	// which is the case the value alone cannot detect.
+	c.Assert(fs.Parse([]string{"-check.r=plain"}), IsNil)
+	c.Assert(flagWasSet(fs, "check.r"), Equals, true)
+	c.Assert(flagWasSet(fs, "check.output"), Equals, false)
+}
+
+func (s *FlagEnvTestSuite) TestFlagOrEnvReadsTheEnvironment(c *C) {
+	const name = "GOCHECK_TEST_ONLY_VAR"
+	c.Assert(os.Setenv(name, "from-env"), IsNil)
+	defer os.Unsetenv(name)
+
+	// Name a flag that cannot have been passed, so the result does not depend
+	// on how this suite itself was invoked; flagWasSet is covered separately.
+	const unpassed = "gocheck.no.such.flag"
+	c.Assert(flagOrEnv(unpassed, name, "plain"), Equals, "from-env")
+	c.Assert(flagOrEnv(unpassed, "GOCHECK_TEST_ONLY_UNSET", "plain"), Equals, "plain")
 }

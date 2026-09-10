@@ -58,8 +58,8 @@ var (
 	newBenchMem        = flag.Bool("check.bmem", false, "Report memory benchmarks")
 	newListFlag        = flag.Bool("check.list", false, "List the names of all tests that will be run")
 	newWorkFlag        = flag.Bool("check.work", false, "Display and do not remove the test working directory")
-	reporterFlag       = flag.String("check.r", "plain", "Comma separated list of reporters for outputting results: [plain|xunit]")
-	outputFlag         = flag.String("check.output", "", "Name of the file to print report into. The token %pkg is replaced by the import path of the package under test, with slashes turned into underscores, so that packages tested in parallel do not overwrite each other. If empty, stdout is used")
+	reporterFlag       = flag.String("check.r", "plain", "Comma separated list of reporters for outputting results: [plain|xunit]. Defaults to $GOCHECK_REPORTERS when not given")
+	outputFlag         = flag.String("check.output", "", "Name of the file to print report into. The token %pkg is replaced by the import path of the package under test, with slashes turned into underscores, so that packages tested in parallel do not overwrite each other. Defaults to $GOCHECK_OUTPUT when not given; if both are empty, stdout is used")
 	newConcurrencyFlag = flag.Int("check.c", 5, "How many tests to run concurrently for concurrent test suites")
 )
 
@@ -81,7 +81,7 @@ func TestingT(testingT *testing.T) {
 		KeepWorkDir:      *oldWorkFlag || *newWorkFlag,
 		ConcurrencyLevel: *newConcurrencyFlag,
 	}
-	names, err := parseReporters(*reporterFlag)
+	names, err := parseReporters(flagOrEnv("check.r", envReporters, *reporterFlag))
 	if err != nil {
 		testingT.Fatal(err.Error())
 	}
@@ -99,7 +99,8 @@ func TestingT(testingT *testing.T) {
 
 	// %pkg resolves against the package that called TestingT, which is the
 	// package whose tests are about to run.
-	fileOutput, err := getOutput(*outputFlag, callerPackagePath(1))
+	fileOutput, err := getOutput(flagOrEnv("check.output", envOutput, *outputFlag),
+		callerPackagePath(1))
 	if err != nil {
 		testingT.Fatal(err.Error())
 	}
@@ -155,6 +156,46 @@ func TestingT(testingT *testing.T) {
 	if !result.Passed() {
 		testingT.Fail()
 	}
+}
+
+// Environment variables supplying defaults for the reporting flags. Passing
+// -check.r or -check.output to "go test ./..." fails outright in any package
+// that does not link gocheck, with "flag provided but not defined", so a
+// repository mixing gocheck and plain testing packages has to configure the
+// reporters out of band.
+const (
+	envReporters = "GOCHECK_REPORTERS"
+	envOutput    = "GOCHECK_OUTPUT"
+)
+
+// flagOrEnv returns the value to use for a flag, preferring the environment
+// variable named by envName over the flag's default.
+func flagOrEnv(flagName, envName, flagValue string) string {
+	return resolveFlag(flagWasSet(flag.CommandLine, flagName), flagValue, os.Getenv(envName))
+}
+
+// resolveFlag decides between a flag value and an environment override. A
+// flag that was actually passed always wins, so a local
+// -check.output=/tmp/foo.xml still beats whatever the CI harness exported. An
+// unset or empty environment variable leaves the flag's own default in place,
+// rather than being reported as a malformed value.
+func resolveFlag(passed bool, flagValue, envValue string) string {
+	if passed || envValue == "" {
+		return flagValue
+	}
+	return envValue
+}
+
+// flagWasSet reports whether the named flag was given on the command line, as
+// opposed to holding its default. -check.r defaults to "plain", so its value
+// alone cannot distinguish an explicit -check.r=plain from an absent flag.
+func flagWasSet(fs *flag.FlagSet, name string) (passed bool) {
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			passed = true
+		}
+	})
+	return
 }
 
 // parseReporters splits the -check.r value into reporter names, rejecting

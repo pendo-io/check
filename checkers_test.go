@@ -4,12 +4,23 @@ import (
 	"errors"
 	"github.com/masukomi/check"
 	"reflect"
+	"regexp"
 	"runtime"
 )
 
 type CheckersS struct{}
 
 var _ = check.Suite(&CheckersS{})
+
+// recoveredNilPanic reports what recover returns for panic(nil) in this
+// build. Go 1.21 made panic(nil) raise a *runtime.PanicNilError instead of a
+// nil value, and GODEBUG=panicnil=1 restores the old behaviour. Which applies
+// is decided by the go directive of the main module rather than by gocheck,
+// so the nil panic expectations below are derived rather than hardcoded.
+func recoveredNilPanic() (recovered interface{}) {
+	defer func() { recovered = recover() }()
+	panic(nil)
+}
 
 func testInfo(c *check.C, checker check.Checker, name string, paramNames []string) {
 	info := checker.Info()
@@ -204,8 +215,9 @@ func (s *CheckersS) TestPanics(c *check.C) {
 	c.Assert(params[0], check.ErrorMatches, "KABOOM")
 	c.Assert(names[0], check.Equals, "panic")
 
-	// Verify a nil panic
-	testCheck(c, check.Panics, true, "", func() { panic(nil) }, nil)
+	// Verify a nil panic. Whatever a nil panic carries in this build, Panics
+	// must match it, and must not match an unrelated value.
+	testCheck(c, check.Panics, true, "", func() { panic(nil) }, recoveredNilPanic())
 	testCheck(c, check.Panics, false, "", func() { panic(nil) }, "NOPE")
 }
 
@@ -230,8 +242,15 @@ func (s *CheckersS) TestPanicMatches(c *check.C) {
 	c.Assert(params[0], check.Equals, "KABOOM")
 	c.Assert(names[0], check.Equals, "panic")
 
-	// Verify a nil panic
-	testCheck(c, check.PanicMatches, false, "Panic value is not a string or an error", func() { panic(nil) }, "")
+	// Verify a nil panic. Since Go 1.21 it carries a *runtime.PanicNilError,
+	// which is an error and so matches like any other; under
+	// GODEBUG=panicnil=1 it is a bare nil that PanicMatches cannot match.
+	if err, ok := recoveredNilPanic().(error); ok {
+		testCheck(c, check.PanicMatches, true, "", func() { panic(nil) }, regexp.QuoteMeta(err.Error()))
+		testCheck(c, check.PanicMatches, false, "", func() { panic(nil) }, "NOPE")
+	} else {
+		testCheck(c, check.PanicMatches, false, "Panic value is not a string or an error", func() { panic(nil) }, "")
+	}
 }
 
 func (s *CheckersS) TestSliceIncludes(c *check.C) {

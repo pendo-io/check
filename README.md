@@ -84,12 +84,81 @@ Run it with `go test`
   -check.c=5: How many tests to run concurrently for concurrent test suites
   -check.f="": Regular expression selecting which tests and/or suites to run
 
-  -check.output="": Name of the file to print report into. If empty, stdout is used
-  -check.r="plain": Name of reporter for outputting result: [plain|xunit]
+  -check.output="": Name of the file to print report into. The token %pkg is
+                    replaced by the import path of the package under test, with
+                    slashes turned into underscores. Defaults to $GOCHECK_OUTPUT
+                    when not given; if both are empty, stdout is used
+  -check.r="plain": Comma separated list of reporters for outputting results:
+                    [plain|xunit]. Defaults to $GOCHECK_REPORTERS when not given
   -check.v=false: Verbose mode
   -check.vv=false: Super verbose mode (disables output caching)
   -check.work=false: Display and do not remove the test working directory
 ```
+
+### JUnit / xUnit reports in CI
+
+The `xunit` reporter writes a JUnit style XML report that CI systems such as
+CircleCI and Jenkins can ingest.
+
+`go test` runs one binary per package, in parallel, and hands each of them the
+same `-check.output` value. A literal file name therefore has every package
+truncating and rewriting the same file, and only the last one to finish
+survives. Use the `%pkg` token to give each package its own file:
+
+```
+go test ./... -check.r=plain,xunit -check.output=reports/junit/junit-check-%pkg.xml
+```
+
+which produces, for packages `example.com/project/timings` and `example.com/project/api`:
+
+```
+reports/junit/junit-check-example.com_project_timings.xml
+reports/junit/junit-check-example.com_project_api.xml
+```
+
+Any directories in the path are created if they do not already exist.
+
+A package whose tests live in an external `foo_test` package reports itself
+under that name, so `example.com/project/timings` tested from `package timings_test`
+writes `junit-check-example.com_project_timings_test.xml`.
+
+`-check.r` accepts several reporters at once. With a single reporter the report
+and the log both go to `-check.output`, as before. With more than one, the
+reporters that produce a report write it to `-check.output` while the `plain`
+reporter keeps narrating to stdout, so a failing CI job still prints the
+assertion detail instead of a bare `--- FAIL: Test`.
+
+#### Mixing gocheck and plain testing packages
+
+Passing `-check.r` or `-check.output` to `go test ./...` fails in any package
+that does not link gocheck, because its test binary does not define those
+flags:
+
+```
+flag provided but not defined: -check.r
+FAIL    example.com/project/plainpkg
+```
+
+Set the environment variables instead. They apply only to the binaries that
+link gocheck and are ignored by every other package:
+
+```
+GOCHECK_REPORTERS=plain,xunit \
+GOCHECK_OUTPUT=reports/junit/junit-check-%pkg.xml \
+    go test ./...
+```
+
+`GOCHECK_REPORTERS` supplies the default for `-check.r` and `GOCHECK_OUTPUT`
+the default for `-check.output`. A flag that is actually passed always wins, so
+`-check.output=/tmp/foo.xml` still overrides an exported `GOCHECK_OUTPUT`, and
+that holds for `-check.r=plain` too even though `plain` is also the flag's
+default. An unset or empty variable leaves the flag's default in place.
+
+Test cases are reported with a `classname` of `<import path>.<suite name>`,
+for example `example.com/project/api.TasksTests`, and each `testsuite` carries the
+same import path as its `package`. Suite names repeat freely across a large
+repository and CI systems group by these attributes, so without the import
+path unrelated suites are merged into one row in the UI.
 
 The following two runtime options currently have issues. Pull requests (with test) would be greatly appreciated.
 

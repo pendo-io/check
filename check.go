@@ -109,6 +109,11 @@ func (l *logger) Write(buf []byte) (int, error) {
 	return l.writer.Write(buf)
 }
 
+// WriteTo drains the log into w. Consuming it is deliberate: a test and its
+// SetUpTest fixture share one logger, so reporting the fixture's panic and
+// then the test's must not repeat the same trace twice. Reporters that only
+// read the log, such as xunit, must therefore run before this one; see
+// combineWriters.
 func (l *logger) WriteTo(w io.Writer) (int64, error) {
 	l.Lock()
 	defer l.Unlock()
@@ -373,16 +378,43 @@ func niceFuncPath(pc uintptr) string {
 	return "<unknown path>"
 }
 
-func getFuncPackage(pc uintptr) (pack string) {
+// getFuncPackagePath returns the full import path of the package that
+// defines the function at pc, e.g. "example.com/project/api". It is unique
+// across the whole build, which is what report file names and xUnit
+// classnames need in order not to collide between packages.
+//
+// It returns "" when the package cannot be determined.
+func getFuncPackagePath(pc uintptr) string {
 	function := runtime.FuncForPC(pc)
-	if function != nil {
-		filename, _ := function.FileLine(pc)
-		pack = path.Base(path.Dir(filename))
-	} else {
-		pack = "<unknown package>"
+	if function == nil {
+		return ""
 	}
+	return funcNamePackagePath(function.Name())
+}
 
-	return
+// funcNamePackagePath splits a runtime.Func name into its package path.
+//
+// Names look like "import/path.Func", "import/path.(*Type).Method" or
+// "import/path.Type.Method". Earlier elements of the path may contain dots
+// ("example.com/project/model"), but the linker escapes any dot in the final element as
+// %2e ("gopkg.in/check%2ev1.TestingT") exactly so that the boundary stays
+// unambiguous. The split point is therefore the first dot after the last
+// slash, and the escape is undone afterwards.
+func funcNamePackagePath(name string) string {
+	start := strings.LastIndex(name, "/") + 1
+	if dot := strings.Index(name[start:], "."); dot >= 0 {
+		name = name[:start+dot]
+	}
+	return unescapeFuncName(name)
+}
+
+// unescapeFuncName reverses the linker's escaping of a package path. Of the
+// characters an import path may contain, only the dot is ever escaped.
+func unescapeFuncName(name string) string {
+	if !strings.Contains(name, "%") {
+		return name
+	}
+	return strings.NewReplacer("%2e", ".", "%2E", ".").Replace(name)
 }
 
 func getFuncPosition(pc uintptr) (file string, line int) {

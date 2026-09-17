@@ -61,6 +61,10 @@ var (
 	reporterFlag       = flag.String("check.r", "plain", "Comma separated list of reporters for outputting results: [plain|xunit]. Defaults to $GOCHECK_REPORTERS when not given")
 	outputFlag         = flag.String("check.output", "", "Name of the file to print report into. The token %pkg is replaced by the import path of the package under test, with slashes turned into underscores, so that packages tested in parallel do not overwrite each other. Defaults to $GOCHECK_OUTPUT when not given; if both are empty, stdout is used")
 	newConcurrencyFlag = flag.Int("check.c", 5, "How many tests to run concurrently for concurrent test suites")
+
+	shardFlag        = flag.String("check.shard", "", "Run only shard i of n, written i/n with i zero-based. Every shard of one run must be given the same -check.shard.seed and -check.shard.weights, and a runner collecting them must check that the partition fingerprints they print match")
+	shardSeedFlag    = flag.Int64("check.shard.seed", 0, "Seed deciding which suites share a shard; 0 keeps the deterministic split. Pass the same seed to every shard of one run, and record it - it is the only way to reproduce a failure that co-residency caused")
+	shardWeightsFlag = flag.String("check.shard.weights", "", "Optional `file` of SuiteName<TAB>seconds lines used to balance the shards. Must be identical for every shard of one run")
 )
 
 // TestingT runs all test suites registered with the Suite function,
@@ -80,7 +84,22 @@ func TestingT(testingT *testing.T) {
 		BenchmarkMem:     *newBenchMem,
 		KeepWorkDir:      *oldWorkFlag || *newWorkFlag,
 		ConcurrencyLevel: *newConcurrencyFlag,
+		Shard:            *shardFlag,
+		ShardSeed:        *shardSeedFlag,
+		ShardWeights:     *shardWeightsFlag,
 	}
+
+	// Reject a bad shard spec before anything else: both the test list and the report file name
+	// depend on it.
+	var shard *shardSpec
+	if conf.Shard != "" {
+		spec, err := parseShardSpec(conf.Shard)
+		if err != nil {
+			testingT.Fatal(err.Error())
+		}
+		shard = &spec
+	}
+
 	names, err := parseReporters(flagOrEnv("check.r", envReporters, *reporterFlag))
 	if err != nil {
 		testingT.Fatal(err.Error())
@@ -99,8 +118,11 @@ func TestingT(testingT *testing.T) {
 
 	// %pkg resolves against the package that called TestingT, which is the
 	// package whose tests are about to run.
-	fileOutput, err := getOutput(flagOrEnv("check.output", envOutput, *outputFlag),
-		callerPackagePath(1))
+	outputPath := flagOrEnv("check.output", envOutput, *outputFlag)
+	if shard != nil && outputPath != "" {
+		outputPath = shardOutputPath(outputPath, *shard)
+	}
+	fileOutput, err := getOutput(outputPath, callerPackagePath(1))
 	if err != nil {
 		testingT.Fatal(err.Error())
 	}
@@ -270,9 +292,17 @@ func getWriter(name string, writer io.Writer, verbose, stream bool) (outputWrite
 // RunAll runs all test suites registered with the Suite function, using the
 // provided run configuration.
 func RunAll(runConf *RunConf) *Result {
-	concurrent := make([]interface{}, 0, len(allSuites))
-	serial := make([]interface{}, 0, len(allSuites))
-	for _, s := range allSuites {
+	suites, plan, err := shardSuites(runConf)
+	if err != nil {
+		return &Result{RunError: err}
+	}
+	if plan != nil {
+		announceShard(os.Stderr, runConf, plan, len(allSuites))
+	}
+
+	concurrent := make([]interface{}, 0, len(suites))
+	serial := make([]interface{}, 0, len(suites))
+	for _, s := range suites {
 		if s.concurrent {
 			concurrent = append(concurrent, s.suite)
 		} else {
@@ -318,9 +348,16 @@ func RunConcurrent(suite interface{}, runConf *RunConf, bucket *concurrencyBucke
 // ListAll returns the names of all the test functions registered with the
 // Suite function that will be run with the provided run configuration.
 func ListAll(runConf *RunConf) []string {
+	suites, _, err := shardSuites(runConf)
+	if err != nil {
+		// TestingT rejects a bad shard spec before it lists, so this is reachable only from a
+		// direct caller. Listing nothing is the safe answer; the alternative quietly lists tests
+		// that the shard would not have run.
+		return nil
+	}
 	var names []string
-	for _, suite := range allSuites {
-		names = append(names, List(suite, runConf)...)
+	for _, suite := range suites {
+		names = append(names, List(suite.suite, runConf)...)
 	}
 	return names
 }

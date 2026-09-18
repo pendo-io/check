@@ -253,3 +253,24 @@ func TestShardOutputPath(t *testing.T) {
 		}
 	}
 }
+
+func TestShardSeedOrEnv(t *testing.T) {
+	// No flag is passed under `go test`, so the environment decides; a seed given on the command
+	// line winning over it is the same precedence flagOrEnv applies to every other setting.
+	for value, want := range map[string]int64{"": 0, "42": 42, " 7 ": 7, "-3": -3} {
+		t.Setenv(envShardSeed, value)
+		got, err := shardSeedOrEnv()
+		if err != nil {
+			t.Errorf("%s=%q: %v", envShardSeed, value, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s=%q gave seed %d, want %d", envShardSeed, value, got, want)
+		}
+	}
+
+	t.Setenv(envShardSeed, "not-a-number")
+	if _, err := shardSeedOrEnv(); err == nil {
+		t.Errorf("%s=not-a-number was accepted", envShardSeed)
+	}
+}

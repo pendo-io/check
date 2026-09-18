@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -62,9 +63,9 @@ var (
 	outputFlag         = flag.String("check.output", "", "Name of the file to print report into. The token %pkg is replaced by the import path of the package under test, with slashes turned into underscores, so that packages tested in parallel do not overwrite each other. Defaults to $GOCHECK_OUTPUT when not given; if both are empty, stdout is used")
 	newConcurrencyFlag = flag.Int("check.c", 5, "How many tests to run concurrently for concurrent test suites")
 
-	shardFlag        = flag.String("check.shard", "", "Run only shard i of n, written i/n with i zero-based. Every shard of one run must be given the same -check.shard.seed and -check.shard.weights, and a runner collecting them must check that the partition fingerprints they print match")
-	shardSeedFlag    = flag.Int64("check.shard.seed", 0, "Seed deciding which suites share a shard; 0 keeps the deterministic split. Pass the same seed to every shard of one run, and record it - it is the only way to reproduce a failure that co-residency caused")
-	shardWeightsFlag = flag.String("check.shard.weights", "", "Optional `file` of SuiteName<TAB>seconds lines used to balance the shards. Must be identical for every shard of one run")
+	shardFlag        = flag.String("check.shard", "", "Run only shard i of n, written i/n with i zero-based. Every shard of one run must be given the same -check.shard.seed and -check.shard.weights, and a runner collecting them must check that the partition fingerprints they print match. Defaults to $GOCHECK_SHARD when not given")
+	shardSeedFlag    = flag.Int64("check.shard.seed", 0, "Seed deciding which suites share a shard; 0 keeps the deterministic split. Pass the same seed to every shard of one run, and record it - it is the only way to reproduce a failure that co-residency caused. Defaults to $GOCHECK_SHARD_SEED when not given")
+	shardWeightsFlag = flag.String("check.shard.weights", "", "Optional `file` of SuiteName<TAB>seconds lines used to balance the shards. Must be identical for every shard of one run. Defaults to $GOCHECK_SHARD_WEIGHTS when not given")
 )
 
 // TestingT runs all test suites registered with the Suite function,
@@ -75,6 +76,10 @@ func TestingT(testingT *testing.T) {
 	if benchTime == 1*time.Second {
 		benchTime = *oldBenchTime
 	}
+	shardSeed, err := shardSeedOrEnv()
+	if err != nil {
+		testingT.Fatal(err.Error())
+	}
 	conf := &RunConf{
 		Filter:           *oldFilterFlag + *newFilterFlag,
 		Verbose:          *oldVerboseFlag || *newVerboseFlag,
@@ -84,9 +89,9 @@ func TestingT(testingT *testing.T) {
 		BenchmarkMem:     *newBenchMem,
 		KeepWorkDir:      *oldWorkFlag || *newWorkFlag,
 		ConcurrencyLevel: *newConcurrencyFlag,
-		Shard:            *shardFlag,
-		ShardSeed:        *shardSeedFlag,
-		ShardWeights:     *shardWeightsFlag,
+		Shard:            flagOrEnv("check.shard", envShard, *shardFlag),
+		ShardSeed:        shardSeed,
+		ShardWeights:     flagOrEnv("check.shard.weights", envShardWeights, *shardWeightsFlag),
 	}
 
 	// Reject a bad shard spec before anything else: both the test list and the report file name
@@ -180,14 +185,24 @@ func TestingT(testingT *testing.T) {
 	}
 }
 
-// Environment variables supplying defaults for the reporting flags. Passing
-// -check.r or -check.output to "go test ./..." fails outright in any package
-// that does not link gocheck, with "flag provided but not defined", so a
-// repository mixing gocheck and plain testing packages has to configure the
-// reporters out of band.
+// Environment variables supplying defaults for the reporting and sharding
+// flags. Passing -check.r or -check.output to "go test ./..." fails outright in
+// any package that does not link gocheck, with "flag provided but not defined",
+// so a repository mixing gocheck and plain testing packages has to configure
+// the reporters out of band.
+//
+// Sharding has a second reason to prefer the environment: "go test" only reuses
+// a cached test result when every test flag it was given is one it knows, so a
+// -check.shard on the command line makes every shard re-run even when nothing
+// changed. Environment variables a test reads are recorded as cache inputs
+// instead, so shards configured this way are individually cacheable and are
+// still invalidated when the shard, the seed or the weights file changes.
 const (
-	envReporters = "GOCHECK_REPORTERS"
-	envOutput    = "GOCHECK_OUTPUT"
+	envReporters    = "GOCHECK_REPORTERS"
+	envOutput       = "GOCHECK_OUTPUT"
+	envShard        = "GOCHECK_SHARD"
+	envShardSeed    = "GOCHECK_SHARD_SEED"
+	envShardWeights = "GOCHECK_SHARD_WEIGHTS"
 )
 
 // flagOrEnv returns the value to use for a flag, preferring the environment
@@ -218,6 +233,24 @@ func flagWasSet(fs *flag.FlagSet, name string) (passed bool) {
 		}
 	})
 	return
+}
+
+// shardSeedOrEnv resolves -check.shard.seed against $GOCHECK_SHARD_SEED. A flag
+// that was actually passed wins, as it does for every other setting with an
+// environment default.
+func shardSeedOrEnv() (int64, error) {
+	if flagWasSet(flag.CommandLine, "check.shard.seed") {
+		return *shardSeedFlag, nil
+	}
+	value := strings.TrimSpace(os.Getenv(envShardSeed))
+	if value == "" {
+		return *shardSeedFlag, nil
+	}
+	seed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("check: bad %s=%q: %v", envShardSeed, value, err)
+	}
+	return seed, nil
 }
 
 // parseReporters splits the -check.r value into reporter names, rejecting

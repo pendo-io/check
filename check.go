@@ -583,6 +583,9 @@ type RunConf struct {
 	KeepWorkDir      bool
 	ConcurrencyLevel int
 	Writer           outputWriter
+	Shard            string
+	ShardSeed        int64
+	ShardWeights     string
 }
 
 type concurrencyBucket struct {
